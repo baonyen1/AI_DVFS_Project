@@ -1,0 +1,97 @@
+# ============================================
+# .gitignore — AI_DVFS_Project
+# ============================================
+
+# -------- Python --------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files lớn (dùng Git LFS nếu cần)
+software/data/raw/*.csv
+software/data/processed/*.csv
+*.parquet
+*.h5
+
+# Trained model binary (giữ lại metrics JSON)
+software/models/*.pkl
+software/models/*.joblib
+# Nhưng GIỮ LẠI:
+!software/models/model_metrics.json
+!software/models/.gitkeep
+
+# -------- Verilog / EDA --------
+# ModelSim
+*.wlf
+*.ini
+transcript
+vsim.wlf
+modelsim.ini
+work/
+sim_build/
+
+# Vivado generated files
+*.jou
+*.log
+*.str
+*.pb
+*.xpr.bak
+hardware/synth/vivado_project/*.cache/
+hardware/synth/vivado_project/*.hw/
+hardware/synth/vivado_project/*.ip_user_files/
+hardware/synth/vivado_project/*.runs/
+hardware/synth/vivado_project/*.sim/
+hardware/synth/vivado_project/*.gen/
+
+# Bitstream (lớn, generate lại được)
+*.bit
+*.bin
+*.ltx
+*.mcs
+
+# VCD waveform dump (lớn)
+hardware/sim/waveforms/*.vcd
+hardware/sim/waveforms/*.ghw
+# Nhưng GIỮ LẠI .gtkw config:
+!hardware/sim/waveforms/*.gtkw
+
+# -------- OS --------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# -------- IDE --------
+.vscode/
+.idea/
+*.code-workspace
+
+# -------- Outputs tạm --------
+results/*.tmp
+docs/report/*.aux
+docs/report/*.log
+docs/report/*.pdf
+# Giữ lại kết quả quan trọng:
+!results/accuracy_report.csv
+!results/lut_ff_usage.txt
+
+# -------- Auto-generated (luôn regenerate từ script) --------
+# hardware/common/verilog_params.vh được auto-gen bởi export_to_verilog.py
+# Comment dòng dưới nếu muốn track params trong git:
+# hardware/rtl/common/verilog_params.vh
