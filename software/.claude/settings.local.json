@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python src/train_model.py 2>&1)"
+    ]
+  }
+}
