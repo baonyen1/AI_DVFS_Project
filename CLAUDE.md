@@ -210,18 +210,33 @@ AI_DVFS_Project/
 
 ## 📚 Tài Liệu Tham Khảo Chính
 
-> Chi tiết cite + cách dùng xem tại `docs/decisions/0007-reference-ai-dvfs-survey.md`
+> Chi tiết cite + cách dùng xem tại `docs/decisions/000X-reference-*.md`
 
-| # | Tác giả | Tiêu đề | Năm | Dùng cho |
-|---|---|---|---|---|
-| 1 | Shepard | AI enhance DVFS in processor power management | 2024 | Introduction, motivation |
-| 2 | APOLLO (ACM) | Automated Power Modeling Framework | 2021 | Justify f8_efficiency feature |
-| 3 | SmartDPM | ML-Based Dynamic Power Management | 2018 | Justify Observer-Controller arch |
-| 4 | Intel Meteor Lake | AI anticipatory power management | 2023 | PREDICT_HORIZON justification |
+| # | ADR | Tác giả | Tiêu đề ngắn | Năm | Dùng cho |
+|---|---|---|---|---|---|
+| 1 | 0007 | Shepard | AI enhance DVFS — survey | 2024 | Introduction, motivation |
+| 2 | 0007 | APOLLO (ACM) | Automated Power Modeling | 2021 | Justify f8_efficiency |
+| 3 | 0007 | SmartDPM | ML-Based Dynamic Power Mgmt | 2018 | Observer-Controller arch |
+| 4 | 0007 | Intel Meteor Lake | AI anticipatory power mgmt | 2023 | PREDICT_HORIZON justify |
+| 5 | **0008** | Epsiba et al. | LMS-Based DVFS + FSM | 2026 | FSM design, baseline 7.59% |
+| 6 | **0009** | Jiang et al. | CNN+DVFS SkyNet FPGA | 2020 | MMCM scaling, baseline 15% |
 
-**Novelty của project** (nhấn mạnh trong báo cáo):
+**Baseline targets từ papers** (cần vượt qua trong báo cáo):
 ```
-Các paper trên: Software AI → latency ms, phụ thuộc OS
-Project này  : Hardware AI trên FPGA PL → latency 1 cycle (10ns),
-               deterministic real-time, fixed-point Q8.8
+Power saving   : > 7.59%  (LMS paper [0008])
+Energy saving  : > 15%    (SkyNet paper [0009])
+Anticipatory   : ✅        (Intel Meteor Lake [0007])
+Real hardware  : ✅        (SkyNet [0009] dùng ZCU104 thật)
+Real dataset   : ✅        (Alibaba 2018, không phải synthetic [0008])
+```
+
+**Novelty tổng hợp** (nhấn mạnh trong Abstract + Contribution):
+```
+= LMS paper [0008]: AI + FSM + AXI4-Lite design
++ SkyNet [0009]:    FPGA thật + Zynq PS+PL + MMCM scaling
++ THÊM MỚI:        DT Ensemble non-linear + 10 features
+                   Fixed-point Q8.8 hardware inference
+                   6-state FSM (finer than 3-state LMS)
+                   Alibaba 2018 real dataset (not synthetic)
+                   Anticipatory 10-cycle ahead prediction
 ```

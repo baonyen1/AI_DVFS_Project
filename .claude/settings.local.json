@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /home/bao/IC/AI_DVFS_Project && software/venv/bin/python software/src/train_model.py)",
+      "Bash(./venv/bin/pip install datacentertracesdatasets)",
+      "Bash(cd /home/bao/IC/AI_DVFS_Project && ./software/venv/bin/python software/src/train_model.py)"
+    ]
+  }
+}

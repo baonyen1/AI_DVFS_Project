@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
 """
-export_to_verilog.py - Export trained Decision Tree model to Verilog parameters
+export_to_verilog.py - Export trained Decision Tree model to Verilog parameters.
 
-Input:  software/models/trained_tree.pkl
-        software/models/model_metrics.json
-Output: software/outputs/verilog_params.vh
-        hardware/rtl/common/verilog_params.vh (auto-copy)
-
-This script extracts tree parameters (thresholds, features, values) from the trained
-GradientBoostingClassifier and converts them to Q8.8 fixed-point format for Verilog.
+Input:
+    software/models/trained_tree.pkl
+    software/models/model_metrics.json
 
 Output:
-- THRESHOLD parameters for each node in each tree
-- FEATURE indices for each node
-- LEAF values for each tree
+    software/outputs/verilog_params.vh
+    hardware/rtl/common/verilog_params.vh (auto-copy)
+
+Script này trích xuất tham số cây (thresholds, features, values) từ
+GradientBoostingClassifier và convert sang Q8.8 fixed-point để dùng trong Verilog.
+
+Output:
+- THRESHOLD parameters cho mỗi node trong mỗi tree
+- FEATURE index cho mỗi node
+- LEAF value cho mỗi leaf
 """
 
-import os
 import json
+import os
 import pickle
 from datetime import datetime
 
-# Constants
-Q8_8_SCALE = 256
+from constants import FEATURE_COLS, Q8_8_SCALE, to_q8_8
 # Paths are relative to script location (software/src/)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'outputs')
-HARDWARE_OUTPUT_DIR = os.path.join(PROJECT_ROOT, '..', 'hardware', 'rtl', 'common')
-
-
-def to_q8_8(val):
-    """Convert float to 16-bit signed Q8.8 fixed-point."""
-    v = int(round(val * Q8_8_SCALE))
-    return max(-32768, min(32767, v))
+HARDWARE_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "..", "hardware", "rtl", "common")
 
 
 def q8_8_to_hex(val):
@@ -47,9 +43,9 @@ def q8_8_to_hex(val):
 def load_model(model_path=None):
     """Load trained model."""
     if model_path is None:
-        model_path = os.path.join(PROJECT_ROOT, 'models', 'trained_tree.pkl')
-    with open(model_path, 'rb') as f:
-        model = pickle.load(f)
+        model_path = os.path.join(PROJECT_ROOT, "models", "trained_tree.pkl")
+    with open(model_path, "rb") as file:
+        model = pickle.load(file)
     print(f"[INFO] Loaded model from {model_path}")
     return model
 
@@ -57,9 +53,9 @@ def load_model(model_path=None):
 def load_metrics(metrics_path=None):
     """Load model metrics."""
     if metrics_path is None:
-        metrics_path = os.path.join(PROJECT_ROOT, 'models', 'model_metrics.json')
-    with open(metrics_path, 'r') as f:
-        metrics = json.load(f)
+        metrics_path = os.path.join(PROJECT_ROOT, "models", "model_metrics.json")
+    with open(metrics_path, "r") as file:
+        metrics = json.load(file)
     print(f"[INFO] Loaded metrics from {metrics_path}")
     return metrics
 
@@ -236,6 +232,9 @@ def generate_verilog_params_simple(trees_data, metrics, feature_cols):
     lines.append("//")
     lines.append(f"// CV Accuracy: {metrics['cv_mean']:.4f} (+/- {metrics['cv_std']:.4f})")
     lines.append(f"// Final Accuracy: {metrics['final_accuracy']:.4f}")
+    preproc = metrics.get('preprocess_config', {})
+    if preproc.get('lms_filter'):
+        lines.append(f"// Preprocess: Hybrid LMS+DT (mu={preproc.get('lms_mu', '?')}, order={preproc.get('lms_order', '?')})")
     lines.append("//" + "=" * 62)
     lines.append("")
     lines.append("`ifndef VERILOG_PARAMS_VH")

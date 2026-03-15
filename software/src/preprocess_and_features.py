@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 """
-preprocess_and_features.py - Feature engineering cho AI-DVFS
+preprocess_and_features.py - Feature engineering cho AI-DVFS.
 
-Input:  software/data/processed/alibaba_dataset.csv
-Output: software/data/processed/features_train.csv
-        software/data/processed/features_labels.csv
+Input:
+    software/data/processed/alibaba_dataset.csv
 
-10 Features (thứ tự BẤT BIẾN):
+Output (chính):
+    data/processed/features_train.csv
+    data/processed/preprocess_metadata.json
+
+10 features (thứ tự BẤT BIẾN, định nghĩa tại constants.FEATURE_COLS):
     - f0_workload, f1_mean, f2_std, f3_delta, f4_trend
     - f5_ema, f6_temperature, f7_headroom, f8_efficiency, f9_short_long
 """
 
+import json
 import os
+
 import numpy as np
 import pandas as pd
 
-# Constants
-WINDOW_SIZE = 8
-PREDICT_HORIZON = 10        # default horizon (fallback)
-LOW_THRESH = 30
-HIGH_THRESH = 70
+from constants import (
+    FEATURE_COLS,
+    HIGH_THRESH,
+    LOW_THRESH,
+    PREDICT_HORIZON,
+    WINDOW_SIZE,
+    CLASS_NAMES,
+    to_q8_8,
+)
 
 # ── Adaptive Horizon (Intel Meteor Lake inspired) ──────────────────────────
 # Ý tưởng: horizon ngắn khi workload biến động nhanh (react kịp)
@@ -38,18 +47,54 @@ HORIZON_MIN = 5
 HORIZON_MAX = 15
 STD_MAX_EXPECTED = 20.0     # std tối đa kỳ vọng trong dataset
 
-FEATURE_COLS = [
-    'f0_workload',     # w[-1]                   — workload hiện tại
-    'f1_mean',         # w.mean()                — trung bình 8 samples
-    'f2_std',          # w.std()                 — độ lệch chuẩn (anomaly)
-    'f3_delta',        # w[-1] - w[-2]           — rate of change
-    'f4_trend',        # polyfit slope           — xu hướng tuyến tính
-    'f5_ema',          # EMA alpha=0.25          — smoothed workload
-    'f6_temperature',  # temp[t]                 — nhiệt độ
-    'f7_headroom',     # max(0, 85 - temp[t])    — thermal headroom AMD
-    'f8_efficiency',   # w[-1]/(power+0.01)      — hiệu suất
-    'f9_short_long',   # w[-3:].mean()-w[:5].mean() — short vs long
-]
+# ── Hybrid LMS + DT (paper 0008: LMS as pre-filter) ─────────────────────────
+ENABLE_LMS_FILTER = True    # LMS smooth workload trước feature engineering
+LMS_MU = 0.05               # step size: nhỏ = smooth hơn, lớn = track nhanh hơn
+LMS_ORDER = 2               # 2 taps: predict từ u[n-1], u[n-2]
+
+def lms_filter(workload, mu=LMS_MU, order=LMS_ORDER):
+    """
+    LMS adaptive filter: smooth sensor noise trước khi đưa vào DT.
+
+    Công thức từ paper 0008 (LMS-Based DVFS):
+      y[n] = W · x[n]   với x = [1, u[n-1], u[n-2], ...]
+      e[n] = u[n] - y[n]
+      W[n+1] = W[n] + µ · e[n] · x[n]
+
+    Output y[n] là estimate "denoised" của u[n]. Dùng cho workload trước
+    feature engineering để giảm nhiễu, DT vẫn capture non-linear pattern.
+
+    Args:
+        u: 1D array workload (raw)
+        mu: LMS step size (0.01–0.1)
+        order: số tap (1 hoặc 2)
+    Returns:
+        y: 1D array workload đã LMS-filtered
+    """
+    n_samples = len(workload)
+    if n_samples == 0:
+        return workload
+
+    y = np.zeros(n_samples)
+    order = min(order, n_samples - 1)
+    # W = [bias, w1, w2] cho order=2
+    n_weights = order + 1
+    weights = np.zeros(n_weights)
+    if n_weights > 1:
+        weights[1] = 1.0  # ban đầu predict y ≈ u[n-1]
+
+    for i in range(n_samples):
+        if i < order:
+            y[i] = workload[i]  # warm-up
+            continue
+        x = np.ones(n_weights)
+        for j in range(1, n_weights):
+            x[j] = workload[i - j]
+        y[i] = np.dot(weights, x)
+        error = workload[i] - y[i]
+        weights = weights + mu * error * x
+
+    return y
 
 
 def load_raw_data(input_path='software/data/processed/alibaba_dataset.csv'):
@@ -72,30 +117,29 @@ def engineer_features(workload, temperature, power):
     features = np.zeros((n_features, len(FEATURE_COLS)))
 
     for i in range(n_features):
-        window = workload[i:i + WINDOW_SIZE]
-        w = window  # shorthand
+        window = workload[i : i + WINDOW_SIZE]
 
         # f0: current workload (w[-1])
-        features[i, 0] = w[-1]
+        features[i, 0] = window[-1]
 
         # f1: mean
-        features[i, 1] = np.mean(w)
+        features[i, 1] = np.mean(window)
 
         # f2: std
-        features[i, 2] = np.std(w)
+        features[i, 2] = np.std(window)
 
         # f3: delta (w[-1] - w[-2])
-        features[i, 3] = w[-1] - w[-2] if len(w) >= 2 else 0
+        features[i, 3] = window[-1] - window[-2] if len(window) >= 2 else 0
 
         # f4: trend (polyfit slope)
-        if len(w) >= 2:
-            coeffs = np.polyfit(np.arange(len(w)), w, 1)
+        if len(window) >= 2:
+            coeffs = np.polyfit(np.arange(len(window)), window, 1)
             features[i, 4] = coeffs[0]
         else:
             features[i, 4] = 0
 
         # f5: EMA (alpha=0.25)
-        ema = pd.Series(w).ewm(alpha=0.25).mean().iloc[-1]
+        ema = pd.Series(window).ewm(alpha=0.25).mean().iloc[-1]
         features[i, 5] = ema
 
         # f6: temperature (at end of window)
@@ -105,12 +149,12 @@ def engineer_features(workload, temperature, power):
         features[i, 7] = max(0, 85 - temperature[i + WINDOW_SIZE - 1])
 
         # f8: efficiency (w[-1] / (power + 0.01))
-        p = power[i + WINDOW_SIZE - 1]
-        features[i, 8] = w[-1] / (p + 0.01)
+        power_sample = power[i + WINDOW_SIZE - 1]
+        features[i, 8] = window[-1] / (power_sample + 0.01)
 
         # f9: short vs long term (w[-3:].mean() - w[:5].mean())
-        short_term = np.mean(w[-3:]) if len(w) >= 3 else np.mean(w)
-        long_term = np.mean(w[:5]) if len(w) >= 5 else np.mean(w)
+        short_term = np.mean(window[-3:]) if len(window) >= 3 else np.mean(window)
+        long_term = np.mean(window[:5]) if len(window) >= 5 else np.mean(window)
         features[i, 9] = short_term - long_term
 
     # Create DataFrame
@@ -257,12 +301,6 @@ def create_labels_adaptive(workload, df_features,
     return labels, label_names, horizons
 
 
-def to_q8_8(val):
-    """Convert float to 16-bit signed Q8.8 fixed-point."""
-    v = int(round(val * 256))
-    return max(-32768, min(32767, v))
-
-
 def export_fixed_point_features(df_features, output_path):
     """Export features dưới dạng Q8.8 fixed-point."""
     df_q = df_features.copy()
@@ -273,13 +311,95 @@ def export_fixed_point_features(df_features, output_path):
     return df_q
 
 
-def print_label_distribution(labels, label_names_list, title):
+def print_label_distribution(labels, title):
     """In phân phối label ra màn hình."""
     print(f"\n  [{title}]")
     unique, counts = np.unique(labels, return_counts=True)
-    for cls, cnt in zip(unique, counts):
-        cls_name = ['Low', 'Medium', 'High'][cls]
-        print(f"    {cls_name}: {cnt} ({100*cnt/len(labels):.1f}%)")
+    for cls, count in zip(unique, counts):
+        class_name = CLASS_NAMES[cls] if 0 <= cls < len(CLASS_NAMES) else str(cls)
+        percentage = 100 * count / len(labels)
+        print(f"    {class_name}: {count} ({percentage:.1f}%)")
+
+
+def imbalance_score(labels):
+    """Tính mức mất cân bằng class: max_count / min_count, càng nhỏ càng tốt."""
+    _, counts = np.unique(labels, return_counts=True)
+    if len(counts) == 0:
+        return 0.0
+    return float(counts.max()) / float(counts.min())
+
+
+def select_best_label_mode(labels_fixed, labels_3lvl, labels_cont):
+    """Chọn mode label có imbalance_score thấp nhất."""
+    scores = {
+        'fixed': imbalance_score(labels_fixed),
+        '3level': imbalance_score(labels_3lvl),
+        'continuous': imbalance_score(labels_cont),
+    }
+    print("\n  Imbalance scores (max/min ratio, thấp hơn = tốt hơn):")
+    for mode_name, score in scores.items():
+        marker = " ← BEST" if score == min(scores.values()) else ""
+        print(f"    {mode_name:12s}: {score:.2f}{marker}")
+    best_mode = min(scores, key=scores.get)
+    print(f"\n  → Dùng mode: [{best_mode}] để export")
+    return best_mode
+
+
+def save_all_modes(
+    df_features,
+    min_len,
+    label_map,
+    horizons_best,
+    best_mode,
+):
+    """Save main output, Q8.8 version và 3 file so sánh mode."""
+    print("\n[4/4] Saving outputs...")
+
+    df_out = df_features.iloc[:min_len].copy().reset_index(drop=True)
+    labels_best, names_best, _ = label_map[best_mode]
+    df_out["label"] = labels_best
+    df_out["label_name"] = names_best
+    if horizons_best is not None:
+        df_out["horizon_used"] = horizons_best
+
+    # Save features_train.csv (mode tốt nhất)
+    out_path = "data/processed/features_train.csv"
+    meta_path = "data/processed/preprocess_metadata.json"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df_out.to_csv(out_path, index=False)
+    print(f"[INFO] Features saved to {out_path}")
+
+    # Save metadata (LMS config, label mode) — train_model/export có thể đọc
+    preprocess_meta = {
+        "lms_filter": ENABLE_LMS_FILTER,
+        "lms_mu": LMS_MU,
+        "lms_order": LMS_ORDER,
+        "best_label_mode": best_mode,
+    }
+    with open(meta_path, "w") as file:
+        json.dump(preprocess_meta, file, indent=2)
+    print(f"[INFO] Preprocess metadata saved to {meta_path}")
+
+    # Save Q8.8 fixed-point
+    df_q = df_out[list(FEATURE_COLS)].copy()
+    for col in df_q.columns:
+        df_q[col] = df_q[col].apply(to_q8_8)
+    q88_path = "data/processed/features_train_q8_8.csv"
+    df_q.to_csv(q88_path, index=False)
+    print(f"[INFO] Q8.8 features saved to {q88_path}")
+
+    # Save tất cả 3 mode để so sánh
+    for mode_name, (labels, names, horizons) in label_map.items():
+        df_mode = df_features.iloc[:min_len].copy().reset_index(drop=True)
+        df_mode["label"] = labels
+        df_mode["label_name"] = names
+        if horizons is not None:
+            df_mode["horizon_used"] = horizons
+        path = f"software/data/processed/features_{mode_name}.csv"
+        df_mode.to_csv(path, index=False)
+    print("[INFO] All 3 mode CSVs saved to data/processed/")
+
+    return df_out
 
 
 def main():
@@ -291,9 +411,17 @@ def main():
     print("\n[1/4] Loading raw dataset...")
     df = load_raw_data()
 
-    workload    = df['workload'].values
-    temperature = df['temperature'].values
-    power       = df['power'].values
+    workload_raw = df["workload"].values
+    temperature = df["temperature"].values
+    power = df["power"].values
+
+    # LMS pre-filter (Hybrid LMS+DT — paper 0008)
+    if ENABLE_LMS_FILTER:
+        print(f"\n[1b] LMS pre-filter (µ={LMS_MU}, order={LMS_ORDER})...")
+        workload = lms_filter(workload_raw, mu=LMS_MU, order=LMS_ORDER)
+        print("       Workload smoothed, then used for features")
+    else:
+        workload = workload_raw
 
     # Engineer features
     print("\n[2/4] Engineering 10 features...")
@@ -303,106 +431,60 @@ def main():
     # ── [3/4] Tạo labels: so sánh 3 mode ─────────────────────────────────
     print("\n[3/4] Creating labels — comparing 3 horizon modes...")
 
+    # Labels dùng raw workload (ground truth tương lai)
+    workload_for_labels = workload_raw if ENABLE_LMS_FILTER else workload
+
     # Mode Fixed (baseline)
-    labels_fixed, names_fixed = create_labels(workload)
+    labels_fixed, names_fixed = create_labels(workload_for_labels)
     min_len = min(len(df_features), len(labels_fixed))
     labels_fixed = labels_fixed[:min_len]
 
     # Mode A: 3-level adaptive
     labels_3lvl, names_3lvl, horizons_3lvl = create_labels_adaptive(
-        workload, df_features.iloc[:min_len], mode='3level'
+        workload_for_labels, df_features.iloc[:min_len], mode='3level'
     )
 
     # Mode B: continuous adaptive
     labels_cont, names_cont, horizons_cont = create_labels_adaptive(
-        workload, df_features.iloc[:min_len], mode='continuous'
+        workload_for_labels, df_features.iloc[:min_len], mode='continuous'
     )
 
     # In phân phối để so sánh
     print("\n  Label distribution comparison:")
-    print_label_distribution(labels_fixed, names_fixed,
-                             f"Fixed horizon={PREDICT_HORIZON}")
-    print_label_distribution(labels_3lvl,  names_3lvl,
-                             "Adaptive 3-level (5/10/15)")
-    print_label_distribution(labels_cont,  names_cont,
-                             "Adaptive continuous (5→15)")
+    print_label_distribution(labels_fixed, f"Fixed horizon={PREDICT_HORIZON}")
+    print_label_distribution(labels_3lvl, "Adaptive 3-level (5/10/15)")
+    print_label_distribution(labels_cont, "Adaptive continuous (5→15)")
 
     # In phân phối horizon (mode A & B)
-    print(f"\n  Horizon distribution — Mode A (3-level):")
+    print("\n  Horizon distribution — Mode A (3-level):")
     for h in [HORIZON_SHORT, HORIZON_MID, HORIZON_LONG]:
         cnt = np.sum(horizons_3lvl == h)
         print(f"    horizon={h}: {cnt} ({100*cnt/len(horizons_3lvl):.1f}%)")
 
-    print(f"\n  Horizon distribution — Mode B (continuous):")
+    print("\n  Horizon distribution — Mode B (continuous):")
     for h in range(HORIZON_MIN, HORIZON_MAX + 1):
         cnt = np.sum(horizons_cont == h)
         if cnt > 0:
             print(f"    horizon={h}: {cnt} ({100*cnt/len(horizons_cont):.1f}%)")
 
     # ── Chọn mode tốt nhất (cân bằng class nhất) ──────────────────────────
-    def imbalance_score(labels):
-        """Tính mức mất cân bằng: càng nhỏ càng tốt."""
-        _, counts = np.unique(labels, return_counts=True)
-        return counts.max() / counts.min()
-
-    scores = {
-        'fixed':      imbalance_score(labels_fixed),
-        '3level':     imbalance_score(labels_3lvl),
-        'continuous': imbalance_score(labels_cont),
-    }
-    best_mode = min(scores, key=scores.get)
-    print(f"\n  Imbalance scores (max/min ratio, thấp hơn = tốt hơn):")
-    for mode, score in scores.items():
-        marker = " ← BEST" if mode == best_mode else ""
-        print(f"    {mode:12s}: {score:.2f}{marker}")
+    best_mode = select_best_label_mode(labels_fixed, labels_3lvl, labels_cont)
 
     # Dùng mode tốt nhất
     label_map = {
-        'fixed':      (labels_fixed, names_fixed, None),
-        '3level':     (labels_3lvl,  names_3lvl,  horizons_3lvl),
-        'continuous': (labels_cont,  names_cont,  horizons_cont),
+        "fixed": (labels_fixed, names_fixed, None),
+        "3level": (labels_3lvl, names_3lvl, horizons_3lvl),
+        "continuous": (labels_cont, names_cont, horizons_cont),
     }
     labels_best, names_best, horizons_best = label_map[best_mode]
-    print(f"\n  → Dùng mode: [{best_mode}] để export")
-
-    # ── [4/4] Lưu file ────────────────────────────────────────────────────
-    print("\n[4/4] Saving outputs...")
-
-    df_out = df_features.iloc[:min_len].copy().reset_index(drop=True)
-    df_out['label']       = labels_best
-    df_out['label_name']  = names_best
-    if horizons_best is not None:
-        df_out['horizon_used'] = horizons_best
-
-    # Save features_train.csv (mode tốt nhất)
-    out_path = 'data/processed/features_train.csv'
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df_out.to_csv(out_path, index=False)
-    print(f"[INFO] Features saved to {out_path}")
-
-    # Save Q8.8 fixed-point
-    df_q = df_out[FEATURE_COLS].copy()
-    for col in df_q.columns:
-        df_q[col] = df_q[col].apply(to_q8_8)
-    q88_path = 'data/processed/features_train_q8_8.csv'
-    df_q.to_csv(q88_path, index=False)
-    print(f"[INFO] Q8.8 features saved to {q88_path}")
-
-    # Save tất cả 3 mode để so sánh
-    for mode_name, (lbl, nms, hrs) in label_map.items():
-        df_mode = df_features.iloc[:min_len].copy().reset_index(drop=True)
-        df_mode['label']      = lbl
-        df_mode['label_name'] = nms
-        if hrs is not None:
-            df_mode['horizon_used'] = hrs
-        path = f'software/data/processed/features_{mode_name}.csv'
-        df_mode.to_csv(path, index=False)
-    print(f"[INFO] All 3 mode CSVs saved to data/processed/")
+    df_out = save_all_modes(df_features, min_len, label_map, horizons_best, best_mode)
 
     print("\n" + "=" * 60)
     print("Feature Engineering Complete!")
     print(f"Best horizon mode : {best_mode}")
+    print(f"LMS pre-filter    : {'ON (µ=' + str(LMS_MU) + ')' if ENABLE_LMS_FILTER else 'OFF'}")
     print(f"Output samples    : {len(df_out)}")
     print("=" * 60)
+
 if __name__ == '__main__':
     main()
